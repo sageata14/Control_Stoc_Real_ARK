@@ -10,17 +10,16 @@ from email import encoders
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+import gspread
+from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Control Stoc real Arcaprod", page_icon="🏗️", layout="wide")
 
-CENTRALIZATOR_FILE = "centralizator_arcaprod.xlsx"
-CONFIG_STOCURI_FILE = "config_stocuri.xlsx"
+# Configurații principale
+SHEET_NAME = "Gestiune Stoc Arcaprod"
 EMAIL_DESTINATAR = "sageata14@gmail.com"
-
-# Parola pentru panoul de Admin
 PAROLA_ADMIN = "Arcaprod2026"
 
-# Nomenclatoare
 ANGAJATI = [
     "Andrei Barbuceanu", "Catalin", "George B", "Ionut R", "Cornel I", 
     "Marian D (Vampirul)", "Dumitru U (Mitel)", "Andrei D (Alifie)", 
@@ -31,50 +30,52 @@ ANGAJATI = [
 TIP_MATERIAL = ["Profil Aluminiu", "Feronerie", "Accesorii", "Consumabile", "Sticlă"]
 UNITATI_MASURA = ["cutii", "buc", "bax", "ml", "set", "bare"]
 
-# Structură istoric conform cerințelor din fabrică
 COLOANE_CENTRALIZATOR = ["Timestamp", "Angajat", "Tip Material", "Denumire Material", "Stoc Initial", "Cantitate Ceruta", "Stoc Ramas", "UM", "Status Stoc", "Observatii"]
 COLOANE_STOCURI = ["Denumire Material", "Stoc Actual", "UM"]
 
-# --- FUNCȚIE PENTRU TRIMITERE EMAIL ---
-def trimite_email_cu_atansamente(fisiere):
-    EMAIL_EXPEDIATOR = "adresa_ta_de_gmail@gmail.com"
-    PAROLA_APLICATIE = "parola_ta_de_aplicatie_gmail" 
-    
-    if EMAIL_EXPEDIATOR == "adresa_ta_de_gmail@gmail.com":
-        st.error("⚠️ Trebuie să configurezi adresa de email și parola de aplicație în cod pentru a trimite!")
-        return False
+# --- CONEXIUNE SECURIZATĂ GOOGLE SHEETS ---
+@st.cache_resource
+def conecteaza_gsheet():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
+    return gspread.authorize(creds)
 
-    msg = MIMEMultipart()
-    msg['From'] = EMAIL_EXPEDIATOR
-    msg['To'] = EMAIL_DESTINATAR
-    msg['Subject'] = f"📊 Raport Stocuri & Cereri Arcaprod - {datetime.now().strftime('%d-%m-%Y')}"
-    
-    corp_email = "Bună ziua,\n\nAtasat găsiți rapoartele actualizate privind stocurile și registrul de cereri din fabrică.\n\nO zi bună!"
-    msg.attach(MIMEText(corp_email, 'plain'))
-    
-    for cale_fisier in fisiere:
-        if os.path.exists(cale_fisier):
-            nume_fisier = os.path.basename(cale_fisier)
-            with open(cale_fisier, "rb") as attachment:
-                part = MIMEBase("application", "octet-stream")
-                part.set_payload(attachment.read())
-                encoders.encode_base64(part)
-                part.add_header("Content-Disposition", f"attachment; filename= {nume_fisier}")
-                msg.attach(part)
-                
+def citeste_date_gsheet(nume_foaie, coloane_implicite):
     try:
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(EMAIL_EXPEDIATOR, PAROLA_APLICATIE)
-        server.send_message(msg)
-        server.quit()
+        client = conecteaza_gsheet()
+        sheet = client.open(SHEET_NAME).worksheet(nume_foaie)
+        date = sheet.get_all_records()
+        if not date:
+            return pd.DataFrame(columns=coloane_implicite)
+        return pd.DataFrame(date)
+    except Exception as e:
+        st.error(f"Eroare conectare Google Sheets (Foaia {nume_foaie}): {e}")
+        return pd.DataFrame(columns=coloane_implicite)
+
+def salveaza_stoc_gsheet(df_stoc):
+    try:
+        client = conecteaza_gsheet()
+        sheet = client.open(SHEET_NAME).worksheet("Stocuri")
+        sheet.clear()
+        date_lista = [df_stoc.columns.values.tolist()] + df_stoc.values.tolist()
+        sheet.update(range_name='A1', values=date_lista)
         return True
     except Exception as e:
-        st.error(f"Eroare la trimiterea emailului: {e}")
+        st.error(f"Eroare la salvarea stocului în cloud: {e}")
         return False
 
-# --- FUNCȚIE DE SALVARE EXCEL STILIZAT ---
-def salveaza_excel_stilizat(df_date, cale_fisier, titlu_raport):
+def adauga_in_centralizator_gsheet(rand_nou):
+    try:
+        client = conecteaza_gsheet()
+        sheet = client.open(SHEET_NAME).worksheet("Centralizator")
+        sheet.append_row(list(rand_nou.values()))
+        return True
+    except Exception as e:
+        st.error(f"Eroare la scrierea istoricului în cloud: {e}")
+        return False
+
+# --- GENERARE EXCEL STILIZAT PENTRU EMAIL ---
+def genereaza_excel_memorie(df_date, titlu_raport):
     wb = Workbook()
     ws = wb.active
     ws.title = "Date_Arcaprod"
@@ -82,7 +83,6 @@ def salveaza_excel_stilizat(df_date, cale_fisier, titlu_raport):
     
     ws["A1"] = titlu_raport.upper()
     ws["A1"].font = Font(name="Arial", size=14, bold=True, color="1F497D")
-    
     ws["A2"] = f"Generat la data: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}"
     ws["A2"].font = Font(name="Arial", size=10, italic=True, color="595959")
     
@@ -103,7 +103,6 @@ def salveaza_excel_stilizat(df_date, cale_fisier, titlu_raport):
             cell.value = str(val) if headers[col_num-1] == "Timestamp" else val
             cell.font = Font(name="Arial", size=10)
             cell.border = contur_celula
-            
             if isinstance(val, (int, float)):
                 cell.alignment = Alignment(horizontal="right", vertical="center")
             else:
@@ -117,30 +116,45 @@ def salveaza_excel_stilizat(df_date, cale_fisier, titlu_raport):
             if cell.value: max_len = max(max_len, len(str(cell.value)))
         ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
         
-    wb.save(cale_fisier)
+    nume_fisier = f"{titlu_raport.lower().replace(' ', '_')}.xlsx"
+    wb.save(nume_fisier)
+    return nume_fisier
 
-# --- FUNCȚIE AJUTĂTOARE: CITEȘTE COLOANELE CURATE ---
-def citeste_excel_curat(cale_fisier, coloane_implicite):
-    if not os.path.exists(cale_fisier):
-        return pd.DataFrame(columns=coloane_implicite)
+def trimite_email_cu_atansamente(fisiere):
+    EMAIL_EXPEDIATOR = "adresa_ta_de_gmail@gmail.com"
+    PAROLA_APLICATIE = "parola_ta_de_aplicatie_gmail" 
+    
+    if EMAIL_EXPEDIATOR == "adresa_ta_de_gmail@gmail.com":
+        st.error("⚠️ Configurează adresa de email în cod pentru funcția de expediere!")
+        return False
+
+    msg = MIMEMultipart()
+    msg['From'] = EMAIL_EXPEDIATOR
+    msg['To'] = EMAIL_DESTINATAR
+    msg['Subject'] = f"📊 Raport Stocuri & Cereri Arcaprod - {datetime.now().strftime('%d-%m-%Y')}"
+    msg.attach(MIMEText("Bună ziua,\n\nAtasat găsiți rapoartele descarcate din baza de date permanentă Google Sheets.\n\nO zi bună!", 'plain'))
+    
+    for cale_fisier in fisiere:
+        if os.path.exists(cale_fisier):
+            with open(cale_fisier, "rb") as attachment:
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(attachment.read())
+                encoders.encode_base64(part)
+                part.add_header("Content-Disposition", f"attachment; filename= {os.path.basename(cale_fisier)}")
+                msg.attach(part)
+                
     try:
-        df = pd.read_excel(cale_fisier, skiprows=3)
-        df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
-        if df.empty or not all(col in df.columns for col in coloane_implicite):
-            return pd.DataFrame(columns=coloane_implicite)
-        return df[coloane_implicite]
-    except Exception:
-        return pd.DataFrame(columns=coloane_implicite)
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_EXPEDIATOR, PAROLA_APLICATIE)
+        server.send_message(msg)
+        server.quit()
+        return True
+    except Exception as e:
+        st.error(f"Eroare trimitere email: {e}")
+        return False
 
-# Generare structuri inițiale curate la prima rulare
-if not os.path.exists(CENTRALIZATOR_FILE):
-    salveaza_excel_stilizat(pd.DataFrame(columns=COLOANE_CENTRALIZATOR), CENTRALIZATOR_FILE, "Registru Istoric Comenzi Materiale")
-
-if not os.path.exists(CONFIG_STOCURI_FILE):
-    salveaza_excel_stilizat(pd.DataFrame(columns=COLOANE_STOCURI), CONFIG_STOCURI_FILE, "Baza de Date Stocuri Existente")
-
-
-# --- PANEL ADMIN SECURIZAT (PENTRU INVENTAR/APROVIZIONARE) ---
+# --- PANOU ADMIN SECURIZAT ---
 st.sidebar.title("🔐 Panou Administrare Admin")
 parola_introdusa = st.sidebar.text_input("Introdu parola Admin:", type="password")
 
@@ -171,10 +185,10 @@ if parola_introdusa == PAROLA_ADMIN:
                 
                 df_stoc_salvare = df_nou[COLOANE_STOCURI]
                 
-                if st.sidebar.button("💾 Încarcă noul stoc în baza de date", use_container_width=True):
-                    salveaza_excel_stilizat(df_stoc_salvare, CONFIG_STOCURI_FILE, "Baza de Date Stocuri Existente")
-                    st.sidebar.success("🎯 Noul stoc a fost salvat și înlocuit complet!")
-                    st.rerun()
+                if st.sidebar.button("💾 Încarcă noul stoc în Google Sheets", use_container_width=True):
+                    if salveaza_stoc_gsheet(df_stoc_salvare):
+                        st.sidebar.success("🎯 Noul stoc a fost salvat și sincronizat în Google Sheets!")
+                        st.rerun()
             else:
                 st.sidebar.error("❌ Coloanele obligatorii în tabel trebuie să fie: 'Denumire Material' și 'Stoc Actual'")
         except Exception as e:
@@ -182,8 +196,7 @@ if parola_introdusa == PAROLA_ADMIN:
 elif parola_introdusa != "":
     st.sidebar.error("❌ Parolă incorectă!")
 
-
-# --- INTERFAȚA PRINCIPALĂ (PENTRU ANGAJAȚI / UTILIZATORI) ---
+# --- INTERFAȚA PRINCIPALĂ ANGAJAȚI ---
 st.title("🏗️ Arcaprod - Management & Control Stoc Real")
 
 col_stanga, col_dreapta = st.columns([1, 1.3])
@@ -205,10 +218,10 @@ with col_stanga:
         buton_trimite = st.form_submit_button(label="Procesează și Verifică Cererea")
 
     if buton_trimite and denumire:
-        df_stocuri = citeste_excel_curat(CONFIG_STOCURI_FILE, COLOANE_STOCURI)
-        df_stocuri['Denumire Material'] = df_stocuri['Denumire Material'].astype(str).str.strip().str.upper()
+        df_stocuri = citeste_date_gsheet("Stocuri", COLOANE_STOCURI)
+        if not df_stocuri.empty:
+            df_stocuri['Denumire Material'] = df_stocuri['Denumire Material'].astype(str).str.strip().str.upper()
         
-        # Valori implicite
         stoc_initial = 0
         stoc_ramas = 0
         status_stoc = "stoc 0"
@@ -217,33 +230,27 @@ with col_stanga:
             stoc_initial = int(df_stocuri.loc[df_stocuri["Denumire Material"] == denumire, "Stoc Actual"].values[0])
             
             if stoc_initial >= int(cantitate):
-                # CAZ 1: Avem complet pe stoc
                 stoc_ramas = stoc_initial - int(cantitate)
                 status_stoc = "Existent in STOC"
                 df_stocuri.loc[df_stocuri["Denumire Material"] == denumire, "Stoc Actual"] = stoc_ramas
             elif stoc_initial > 0:
-                # CAZ 2 LOGICA NOUĂ: Avem stoc PARȚIAL (Ex: Avem 10, cere 14)
                 lipsa = int(cantitate) - stoc_initial
-                stoc_ramas = 0 # Le dăm pe toate cele existente, deci ramânem cu 0
+                stoc_ramas = 0
                 status_stoc = f"stoc 0 (S-au eliberat doar {stoc_initial} {um}, rest {lipsa} de comandat urgent!)"
                 df_stocuri.loc[df_stocuri["Denumire Material"] == denumire, "Stoc Actual"] = 0
             else:
-                # CAZ 3: Stocul era deja complet 0
                 stoc_ramas = 0
                 status_stoc = "stoc 0"
                 df_stocuri.loc[df_stocuri["Denumire Material"] == denumire, "Stoc Actual"] = 0
         else:
-            # Reperul nu se află în fișierul încărcat deloc
             nou_rand_stoc = pd.DataFrame([{"Denumire Material": denumire, "Stoc Actual": 0, "UM": um}])
             df_stocuri = pd.concat([df_stocuri, nou_rand_stoc], ignore_index=True)
             stoc_initial = 0
             stoc_ramas = 0
             status_stoc = "stoc 0"
             
-        # Salvează fișierul de stocuri modificat
-        salveaza_excel_stilizat(df_stocuri, CONFIG_STOCURI_FILE, "Baza de Date Stocuri Existente")
+        salveaza_stoc_gsheet(df_stocuri)
         
-        # Generarea înregistrării în centralizator cu valorile fizice logice
         rand_nou_centralizator = {
             "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "Angajat": angajat,
@@ -256,42 +263,42 @@ with col_stanga:
             "Status Stoc": status_stoc,
             "Observatii": observatii
         }
-        df_ex = citeste_excel_curat(CENTRALIZATOR_FILE, COLOANE_CENTRALIZATOR)
-        df_final = pd.concat([df_ex, pd.DataFrame([rand_nou_centralizator])], ignore_index=True)
-        salveaza_excel_stilizat(df_final, CENTRALIZATOR_FILE, "Registru Istoric Comenzi Materiale")
         
-        if status_stoc == "Existent in STOC":
-            st.success(f"✅ Material aprobat complet. Status: {status_stoc}. (Stoc rămas în magazin: {stoc_ramas} {um})")
-        else:
-            st.error(f"🚨 {status_stoc}")
+        if adauga_in_centralizator_gsheet(rand_nou_centralizator):
+            if status_stoc == "Existent in STOC":
+                st.success(f"✅ Material aprobat complet. Status: {status_stoc}. (Stoc rămas în cloud: {stoc_ramas} {um})")
+            else:
+                st.error(f"🚨 {status_stoc}")
 
 with col_dreapta:
-    df_hist = citeste_excel_curat(CENTRALIZATOR_FILE, COLOANE_CENTRALIZATOR)
-    df_stocuri = citeste_excel_curat(CONFIG_STOCURI_FILE, COLOANE_STOCURI)
+    df_hist = citeste_date_gsheet("Centralizator", COLOANE_CENTRALIZATOR)
+    df_stocuri = citeste_date_gsheet("Stocuri", COLOANE_STOCURI)
     
     st.subheader("📧 Expediere Rapoarte")
     if st.button("🚀 Trimite fișierele Excel către sageata14@gmail.com", use_container_width=True):
-        with st.spinner("Se trimit fișierele..."):
-            if trimite_email_cu_atansamente([CENTRALIZATOR_FILE, CONFIG_STOCURI_FILE]):
+        with st.spinner("Se descarcă datele din Google Sheets și se trimit..."):
+            f1 = genereaza_excel_memorie(df_hist, "Registru Istoric Comenzi Materiale")
+            f2 = genereaza_excel_memorie(df_stocuri, "Baza de Date Stocuri Existente")
+            if trimite_email_cu_atansamente([f1, f2]):
                 st.success(f"📩 Rapoartele Excel au fost livrate cu succes la {EMAIL_DESTINATAR}!")
+            if os.path.exists(f1): os.remove(f1)
+            if os.path.exists(f2): os.remove(f2)
 
     st.markdown("---")
-
-    st.subheader("📊 Inventar Depozit în Timp Real")
+    st.subheader("📊 Inventar Depozit în Timp Real (Google Cloud)")
     if not df_stocuri.empty:
         df_stocuri["Stoc Actual"] = pd.to_numeric(df_stocuri["Stoc Actual"]).fillna(0).astype(int)
         df_afisare_stoc = df_stocuri.copy()
         df_afisare_stoc["Status Material"] = df_afisare_stoc["Stoc Actual"].apply(lambda x: "✅ Disponibil în Depozit" if x > 0 else "🚨 STOC 0")
         st.dataframe(df_afisare_stoc, use_container_width=True, hide_index=True)
     else:
-        st.info("Baza de date este goală. Te rog accesează Panoul de Admin din stânga pentru a încărca stocul inițial.")
+        st.info("Baza de date din Google Sheets este goală sau noul stoc nu a fost încărcat din Panoul Admin.")
 
     st.markdown("---")
-
     st.subheader("📋 Istoric Cereri și Mișcări de Stoc")
     if not df_hist.empty:
         if datetime.now().hour >= 15:
             st.warning("🔒 După ora 15:00, registrul de modificări zilnice este securizat.")
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
     else:
-        st.info("Nicio cerere operată în sesiunea curentă.")
+        st.info("Niciun istoric înregistrat în Google Sheet.")
